@@ -201,8 +201,13 @@ def get_leaderboard():
     return df
 
 def available_rounds(df):
-    return [r for r in ["R1", "R2", "R3", "R4"]
-            if r in df.columns and df[r].apply(lambda v: parse_score(v) is not None).any()]
+    """A round is only 'complete' once at least 75% of players have a score in that column."""
+    total = len(df)
+    return [
+        r for r in ["R1", "R2", "R3", "R4"]
+        if r in df.columns
+        and df[r].apply(lambda v: parse_score(v) is not None).sum() >= total * 0.75
+    ]
 
 def detect_current_round(df):
     if "TODAY" not in df.columns:
