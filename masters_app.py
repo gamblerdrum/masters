@@ -368,7 +368,7 @@ def style_table(df):
     pts_cols = ["T1 Pts", "T2 Pts", "T3 Pts", "T4 Pts", "Cap Pts", "Total"]
     styled = df.style
     for col in pts_cols:
-        styled = styled.applymap(colour_pts, subset=[col])
+        styled = styled.map(colour_pts, subset=[col])
     styled = styled.format({c: fmt_pts for c in pts_cols})
     styled = styled.set_properties(subset=["Rank"], **{"font-weight": "bold"})
     return styled
