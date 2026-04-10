@@ -271,8 +271,47 @@ def is_tournament_complete(df):
         return False
     return df["R4"].apply(parse_score).notna().sum() > 10
 
+CUT_SIZE = 50  # Augusta: top 50 and ties make the cut
+
+def get_projected_cut(df, rounds, current_round):
+    """
+    During R2, returns (make_cut_set, miss_cut_set) based on current cumulative
+    to-par. Players who haven't started R2 yet are excluded from both sets —
+    their cut projection is unknown until they tee off.
+    Top 50 and ties make it.
+    """
+    if current_round != "R2":
+        return set(), set()
+
+    cum = cumulative_to_par(df, rounds, current_round)
+    if "R2" not in cum.columns:
+        return set(), set()
+
+    # Only include players who have a live R2 score (TODAY not null)
+    today_vals = df["TODAY"].apply(parse_score)
+    active_idx = today_vals[today_vals.notna()].index
+    scores = cum["R2"].loc[active_idx].dropna().sort_values()
+
+    if scores.empty:
+        return set(), set()
+
+    # Find the score at the cut line (50th position, ties included)
+    if len(scores) <= CUT_SIZE:
+        cut_score = scores.iloc[-1]  # everyone active makes it
+    else:
+        cut_score = scores.iloc[CUT_SIZE - 1]  # 50th score (0-indexed)
+
+    make_idx  = scores[scores <= cut_score].index
+    miss_idx  = scores[scores >  cut_score].index
+
+    make_set  = set(df.loc[make_idx, "PLAYER"].values)
+    miss_set  = set(df.loc[miss_idx, "PLAYER"].values)
+    return make_set, miss_set
+
+
 def score_golfer(df_name, df, rounds, round_leaders, low_round_scorers,
-                 complete, hole_in_ones, tie_for_2nd_blocks_3rd, current_round=None):
+                 complete, hole_in_ones, tie_for_2nd_blocks_3rd,
+                 current_round=None, proj_cut_make=None, proj_cut_miss=None):
     """Returns (confirmed_pts, projected_pts) separately."""
     match = df[df["PLAYER"].apply(lambda n: fuzzy_match(df_name, str(n)))]
     if match.empty:
@@ -317,7 +356,7 @@ def score_golfer(df_name, df, rounds, round_leaders, low_round_scorers,
         if any(fuzzy_match(actual_name, l) for l in low_round_scorers[current_round]):
             projected += 3
 
-    # Cut — confirmed once cut has happened
+    # Cut — confirmed once cut has actually happened (R3 started)
     cut_has_happened = len(rounds) >= 2 and (len(rounds) >= 3 or current_round in ("R3", "R4"))
     pos_str = str(row.get("POS", ""))
     if cut_has_happened:
@@ -325,6 +364,13 @@ def score_golfer(df_name, df, rounds, round_leaders, low_round_scorers,
             confirmed -= 5
         else:
             confirmed += 10
+    elif current_round == "R2" and proj_cut_make is not None and proj_cut_miss is not None:
+        # Project cut during R2 based on current leaderboard position
+        if any(fuzzy_match(actual_name, p) for p in proj_cut_make):
+            projected += 10
+        elif any(fuzzy_match(actual_name, p) for p in proj_cut_miss):
+            projected -= 5
+        # Players not yet on the course get 0 — unknown
 
     # Final finish — confirmed only when tournament done
     if complete and not missed_cut(pos_str):
@@ -351,11 +397,13 @@ def build_league_table(df):
     tie_for_2nd_blocks_3rd = (tied_2nd >= 3)
 
     all_golfers = {pick for entry in LEAGUE for pick in entry[1:]}
+    proj_cut_make, proj_cut_miss = get_projected_cut(df, rounds, current_round)
     golfer_conf = {}
     golfer_proj = {}
     for g in all_golfers:
         c, p = score_golfer(g, df, rounds, round_leaders, low_round_scorers,
-                            complete, HOLE_IN_ONES, tie_for_2nd_blocks_3rd, current_round)
+                            complete, HOLE_IN_ONES, tie_for_2nd_blocks_3rd,
+                            current_round, proj_cut_make, proj_cut_miss)
         golfer_conf[g] = c
         golfer_proj[g] = p
 
@@ -434,7 +482,7 @@ def style_table(df):
 
 # ── App layout ────────────────────────────────────────────────────────────────
 
-st.title("⛳ Masters Fantasy League 2026")
+st.title("⛳ Masters Fantasy League 2025")
 
 col1, col2 = st.columns([3, 1])
 with col2:
