@@ -488,7 +488,7 @@ with st.spinner("Fetching live leaderboard..."):
 
         # Status banner
         if current_round:
-            st.info(f"🟢 **{current_round} in progress** — confirmed points are locked in, projected points reflect live scores")
+            st.info(f"🟢 **{current_round} in progress** — confirmed points are locked in, projected points reflect live scores including end of day points and cut")
         elif complete:
             st.success("🏆 Tournament complete — final standings")
         elif rounds:
