@@ -434,7 +434,7 @@ def style_table(df):
 
 # ── App layout ────────────────────────────────────────────────────────────────
 
-st.title("⛳ Masters Fantasy League 2025")
+st.title("⛳ Masters Fantasy League 2026")
 
 col1, col2 = st.columns([3, 1])
 with col2:
