@@ -273,46 +273,71 @@ def is_tournament_complete(df):
 
 def score_golfer(df_name, df, rounds, round_leaders, low_round_scorers,
                  complete, hole_in_ones, tie_for_2nd_blocks_3rd, current_round=None):
+    """Returns (confirmed_pts, projected_pts) separately."""
     match = df[df["PLAYER"].apply(lambda n: fuzzy_match(df_name, str(n)))]
     if match.empty:
-        return 0
+        return 0, 0
     row = match.iloc[0]
     actual_name = str(row["PLAYER"])
-    pts = 0
+    confirmed = 0
+    projected = 0
 
-    total_score = parse_score(row.get("SCORE", "E"))
-    if total_score is not None:
-        pts += -total_score
+    # Score vs par — completed rounds go to confirmed, today's live score to projected
+    completed_to_par = sum(
+        (parse_score(row.get(r, "--")) or 0) - PAR_PER_ROUND
+        for r in rounds
+        if parse_score(row.get(r, "--")) is not None
+    )
+    confirmed += -completed_to_par
 
+    if current_round and "TODAY" in df.columns:
+        today_val = parse_score(row.get("TODAY", "--"))
+        if today_val is not None:
+            projected += -today_val
+
+    # Hole in one — always confirmed
     if any(fuzzy_match(df_name, h) for h in hole_in_ones):
-        pts += 5
+        confirmed += 5
 
+    # Round leaders — completed rounds confirmed, live round projected
     for r, bonus in {"R1": 5, "R2": 5, "R3": 5}.items():
-        if r in round_leaders and any(fuzzy_match(actual_name, l) for l in round_leaders[r]):
-            pts += bonus
+        if r not in round_leaders:
+            continue
+        if any(fuzzy_match(actual_name, l) for l in round_leaders[r]):
+            if r == current_round:
+                projected += bonus
+            else:
+                confirmed += bonus
 
-    for r in list(rounds) + ([current_round] if current_round else []):
+    # Low round — completed rounds confirmed, live round projected
+    for r in rounds:
         if r in low_round_scorers and any(fuzzy_match(actual_name, l) for l in low_round_scorers[r]):
-            pts += 3
+            confirmed += 3
+    if current_round and current_round in low_round_scorers:
+        if any(fuzzy_match(actual_name, l) for l in low_round_scorers[current_round]):
+            projected += 3
 
+    # Cut — confirmed once cut has happened
     cut_has_happened = len(rounds) >= 2 and (len(rounds) >= 3 or current_round in ("R3", "R4"))
     pos_str = str(row.get("POS", ""))
     if cut_has_happened:
         if missed_cut(pos_str):
-            pts -= 5
+            confirmed -= 5
         else:
-            pts += 10
+            confirmed += 10
 
+    # Final finish — confirmed only when tournament done
     if complete and not missed_cut(pos_str):
         pos_num = parse_position(pos_str)
         if pos_num == 1:
-            pts += 10
+            confirmed += 10
         if pos_num == 2:
-            pts += 5
+            confirmed += 5
         if pos_num == 3 and not tie_for_2nd_blocks_3rd:
-            pts += 3
+            confirmed += 3
 
-    return pts
+    return confirmed, projected
+
 
 def build_league_table(df):
     rounds = available_rounds(df)
@@ -326,59 +351,89 @@ def build_league_table(df):
     tie_for_2nd_blocks_3rd = (tied_2nd >= 3)
 
     all_golfers = {pick for entry in LEAGUE for pick in entry[1:]}
-    golfer_pts = {
-        g: score_golfer(g, df, rounds, round_leaders, low_round_scorers,
-                        complete, HOLE_IN_ONES, tie_for_2nd_blocks_3rd, current_round)
-        for g in all_golfers
-    }
+    golfer_conf = {}
+    golfer_proj = {}
+    for g in all_golfers:
+        c, p = score_golfer(g, df, rounds, round_leaders, low_round_scorers,
+                            complete, HOLE_IN_ONES, tie_for_2nd_blocks_3rd, current_round)
+        golfer_conf[g] = c
+        golfer_proj[g] = p
 
     rows = []
     for entry in LEAGUE:
         participant = entry[0]
         t1, t2, t3, t4, captain = entry[1], entry[2], entry[3], entry[4], entry[5]
         picks = [t1, t2, t3, t4]
-        base_pts = [golfer_pts.get(p, 0) for p in picks]
-        cap_pts = golfer_pts.get(captain, 0) * 2
-        total = sum(base_pts) + cap_pts
+
+        conf  = [golfer_conf.get(p, 0) for p in picks]
+        proj  = [golfer_proj.get(p, 0) for p in picks]
+        total = [c + p for c, p in zip(conf, proj)]
+
+        cap_conf = golfer_conf.get(captain, 0) * 2
+        cap_proj = golfer_proj.get(captain, 0) * 2
+
         rows.append({
-            "Rank":      0,
-            "Player":    participant,
-            "Tier 1":    t1,   "T1 Pts": base_pts[0],
-            "Tier 2":    t2,   "T2 Pts": base_pts[1],
-            "Tier 3":    t3,   "T3 Pts": base_pts[2],
-            "Tier 4":    t4,   "T4 Pts": base_pts[3],
-            "Captain":   captain, "Cap Pts": cap_pts,
-            "Total":     total,
+            "Player":       participant,
+            "Tier 1":       t1,  "T1 Conf": conf[0],  "T1 Proj": proj[0],  "T1 Pts": total[0],
+            "Tier 2":       t2,  "T2 Conf": conf[1],  "T2 Proj": proj[1],  "T2 Pts": total[1],
+            "Tier 3":       t3,  "T3 Conf": conf[2],  "T3 Proj": proj[2],  "T3 Pts": total[2],
+            "Tier 4":       t4,  "T4 Conf": conf[3],  "T4 Proj": proj[3],  "T4 Pts": total[3],
+            "Captain":      captain,
+            "Cap Conf":     cap_conf, "Cap Proj": cap_proj, "Cap Pts": cap_conf + cap_proj,
+            "Confirmed":    sum(conf) + cap_conf,
+            "Projected":    sum(proj) + cap_proj,
+            "Total":        sum(total) + cap_conf + cap_proj,
         })
 
-    result = pd.DataFrame(rows).sort_values("Total", ascending=False).reset_index(drop=True)
-    result["Rank"] = result.index + 1
-    cols = ["Rank", "Player", "Tier 1", "T1 Pts", "Tier 2", "T2 Pts",
-            "Tier 3", "T3 Pts", "Tier 4", "T4 Pts", "Captain", "Cap Pts", "Total"]
-    return result[cols], rounds, current_round, complete
+    result = pd.DataFrame(rows)
+    return result, rounds, current_round, complete
+
 
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 
 def fmt_pts(v):
+    if pd.isna(v):
+        return "0"
+    v = int(v)
     return f"+{v}" if v > 0 else str(v)
 
 def colour_pts(v):
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return ""
     if v > 0:
         return "color: #2e7d32; font-weight: bold"
     elif v < 0:
         return "color: #c62828; font-weight: bold"
     return "color: #555"
 
+def make_display(result, score_col, pts_suffix):
+    """Build a ranked display df using score_col for sorting, showing pts_suffix columns."""
+    df = result.copy().sort_values(score_col, ascending=False).reset_index(drop=True)
+    df.insert(0, "Rank", df.index + 1)
+    cols = ["Rank", "Player",
+            "Tier 1", f"T1{pts_suffix}",
+            "Tier 2", f"T2{pts_suffix}",
+            "Tier 3", f"T3{pts_suffix}",
+            "Tier 4", f"T4{pts_suffix}",
+            "Captain", f"Cap{pts_suffix}",
+            score_col]
+    # rename last col to "Total" for display
+    df = df[cols].rename(columns={score_col: "Total"})
+    return df
+
 def style_table(df):
-    pts_cols = ["T1 Pts", "T2 Pts", "T3 Pts", "T4 Pts", "Cap Pts", "Total"]
+    pts_cols = [c for c in df.columns if c.endswith("Pts") or c == "Total"]
     styled = df.style
     for col in pts_cols:
         styled = styled.map(colour_pts, subset=[col])
     styled = styled.format({c: fmt_pts for c in pts_cols})
-    styled = styled.set_properties(subset=["Rank"], **{"font-weight": "bold"})
     return styled
 
-# Header
+
+# ── App layout ────────────────────────────────────────────────────────────────
+
 st.title("⛳ Masters Fantasy League 2025")
 
 col1, col2 = st.columns([3, 1])
@@ -386,15 +441,14 @@ with col2:
     if st.button("🔄 Refresh data", use_container_width=True):
         st.cache_data.clear()
 
-# Fetch
 with st.spinner("Fetching live leaderboard..."):
     try:
         df_live = get_leaderboard()
-        table, rounds, current_round, complete = build_league_table(df_live)
+        result, rounds, current_round, complete = build_league_table(df_live)
 
         # Status banner
         if current_round:
-            st.info(f"🟢 **{current_round} in progress** — live scores from TODAY column included as projections")
+            st.info(f"🟢 **{current_round} in progress** — confirmed points are locked in, projected points reflect live scores")
         elif complete:
             st.success("🏆 Tournament complete — final standings")
         elif rounds:
@@ -402,20 +456,28 @@ with st.spinner("Fetching live leaderboard..."):
         else:
             st.warning("⏳ Tournament not yet started")
 
-        # Search / filter
         with col1:
             search = st.text_input("🔍 Search for a player", placeholder="Type a name...")
 
-        display = table[table["Player"].str.contains(search, case=False)] if search else table
+        if search:
+            result = result[result["Player"].str.contains(search, case=False)]
 
-        st.dataframe(
-            style_table(display),
-            use_container_width=True,
-            height=min(50 + len(display) * 35, 800),
-            hide_index=True,
-        )
+        # Two tabs
+        tab_confirmed, tab_projected = st.tabs(["✅ Confirmed", "📈 Projected (inc. live round)"])
 
-        st.caption(f"Data auto-refreshes every 2 minutes. Last fetched from ESPN. {len(table)} participants.")
+        height = min(50 + len(result) * 35, 800)
+
+        with tab_confirmed:
+            st.caption("Points locked in from fully completed rounds only. No live round scores included.")
+            conf_df = make_display(result, "Confirmed", " Conf")
+            st.dataframe(style_table(conf_df), use_container_width=True, height=height, hide_index=True)
+
+        with tab_projected:
+            st.caption("Confirmed points + live projections from the current round in progress.")
+            proj_df = make_display(result, "Total", " Pts")
+            st.dataframe(style_table(proj_df), use_container_width=True, height=height, hide_index=True)
+
+        st.caption(f"Data auto-refreshes every 2 minutes. {len(result)} participants shown.")
 
     except Exception as e:
         st.error(f"Failed to fetch leaderboard: {e}")
