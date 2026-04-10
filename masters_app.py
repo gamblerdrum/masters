@@ -275,37 +275,29 @@ CUT_SIZE = 50  # Augusta: top 50 and ties make the cut
 
 def get_projected_cut(df, rounds, current_round):
     """
-    During R2, returns (make_cut_set, miss_cut_set) based on current cumulative
-    to-par. Players who haven't started R2 yet are excluded from both sets —
-    their cut projection is unknown until they tee off.
-    Top 50 and ties make it.
+    During R2, use the live POS column for every player.
+    Strip the T (ties), anyone > 50 is projected to miss, <= 50 projected to make.
     """
     if current_round != "R2":
         return set(), set()
 
-    cum = cumulative_to_par(df, rounds, current_round)
-    if "R2" not in cum.columns:
-        return set(), set()
+    make_set = set()
+    miss_set = set()
 
-    # Only include players who have a live R2 score (TODAY not null)
-    today_vals = df["TODAY"].apply(parse_score)
-    active_idx = today_vals[today_vals.notna()].index
-    scores = cum["R2"].loc[active_idx].dropna().sort_values()
+    for _, row in df.iterrows():
+        player = row["PLAYER"]
+        pos_str = str(row.get("POS", ""))
+        if missed_cut(pos_str):
+            miss_set.add(player)
+            continue
+        pos_num = parse_position(pos_str)
+        if pos_num is None:
+            continue
+        if pos_num <= CUT_SIZE:
+            make_set.add(player)
+        else:
+            miss_set.add(player)
 
-    if scores.empty:
-        return set(), set()
-
-    # Find the score at the cut line (50th position, ties included)
-    if len(scores) <= CUT_SIZE:
-        cut_score = scores.iloc[-1]  # everyone active makes it
-    else:
-        cut_score = scores.iloc[CUT_SIZE - 1]  # 50th score (0-indexed)
-
-    make_idx  = scores[scores <= cut_score].index
-    miss_idx  = scores[scores >  cut_score].index
-
-    make_set  = set(df.loc[make_idx, "PLAYER"].values)
-    miss_set  = set(df.loc[miss_idx, "PLAYER"].values)
     return make_set, miss_set
 
 
