@@ -377,7 +377,109 @@ def score_golfer(df_name, df, rounds, round_leaders, low_round_scorers,
     return confirmed, projected
 
 
-def build_league_table(df):
+def build_golfer_breakdown(df, rounds, current_round, round_leaders,
+                           low_round_scorers, complete, tie_for_2nd_blocks_3rd,
+                           proj_cut_make, proj_cut_miss):
+    """
+    Returns a DataFrame with one row per unique golfer picked in the league,
+    with a column for every scoring category broken down by round.
+    """
+    ROUND_LEADER_LABELS = {"R1": "R1 Lead", "R2": "Halfway Lead", "R3": "R3 Lead"}
+    all_rounds = ["R1", "R2", "R3", "R4"]
+
+    all_golfers = sorted({pick for entry in LEAGUE for pick in entry[1:]})
+    rows = []
+
+    for df_name in all_golfers:
+        match = df[df["PLAYER"].apply(lambda n: fuzzy_match(df_name, str(n)))]
+        if match.empty:
+            continue
+        row = match.iloc[0]
+        actual_name = str(row["PLAYER"])
+        pos_str = str(row.get("POS", ""))
+        r = {"Golfer": df_name, "Position": pos_str, "Score": row.get("SCORE", "--")}
+
+        # ── Score vs par per round ──────────────────────────────────────────
+        for rnd in all_rounds:
+            raw = parse_score(row.get(rnd, "--"))
+            if raw is not None:
+                r[f"{rnd} Score (pts)"] = -(raw - PAR_PER_ROUND)
+            else:
+                r[f"{rnd} Score (pts)"] = ""
+
+        # Today (live, projected)
+        if current_round and "TODAY" in df.columns:
+            today_val = parse_score(row.get("TODAY", "--"))
+            r[f"{current_round} Today (proj pts)"] = -today_val if today_val is not None else ""
+        else:
+            r[f"{current_round or 'Today'} Today (proj pts)"] = ""
+
+        # ── Hole in one ─────────────────────────────────────────────────────
+        r["Hole in One (pts)"] = 5 if any(fuzzy_match(df_name, h) for h in HOLE_IN_ONES) else ""
+
+        # ── Round leaders ────────────────────────────────────────────────────
+        for rnd, label in ROUND_LEADER_LABELS.items():
+            if rnd in round_leaders and any(fuzzy_match(actual_name, l) for l in round_leaders[rnd]):
+                r[f"{label} (pts)"] = f"5{'*' if rnd == current_round else ''}"
+            else:
+                r[f"{label} (pts)"] = ""
+
+        # ── Low round ────────────────────────────────────────────────────────
+        for rnd in all_rounds:
+            col = f"Low Round {rnd} (pts)"
+            if rnd in low_round_scorers and any(fuzzy_match(actual_name, l) for l in low_round_scorers[rnd]):
+                r[col] = f"3{'*' if rnd == current_round else ''}"
+            else:
+                r[col] = ""
+
+        # ── Cut ──────────────────────────────────────────────────────────────
+        cut_has_happened = len(rounds) >= 2 and (len(rounds) >= 3 or current_round in ("R3", "R4"))
+        if cut_has_happened:
+            r["Cut (pts)"] = -5 if missed_cut(pos_str) else 10
+        elif current_round == "R2":
+            if any(fuzzy_match(actual_name, p) for p in proj_cut_make):
+                r["Cut (proj pts)"] = 10
+            elif any(fuzzy_match(actual_name, p) for p in proj_cut_miss):
+                r["Cut (proj pts)"] = -5
+            else:
+                r["Cut (proj pts)"] = ""
+        else:
+            r["Cut (pts)"] = ""
+
+        # ── Final finish ─────────────────────────────────────────────────────
+        r["Champion (pts)"] = ""
+        r["2nd Place (pts)"] = ""
+        r["3rd Place (pts)"] = ""
+        if complete and not missed_cut(pos_str):
+            pos_num = parse_position(pos_str)
+            if pos_num == 1:
+                r["Champion (pts)"] = 10
+            if pos_num == 2:
+                r["2nd Place (pts)"] = 5
+            if pos_num == 3 and not tie_for_2nd_blocks_3rd:
+                r["3rd Place (pts)"] = 3
+
+        rows.append(r)
+
+    breakdown = pd.DataFrame(rows)
+    # Add a total column — sum numeric values only
+    numeric_cols = [c for c in breakdown.columns if c not in ("Golfer", "Position", "Score")]
+    def safe_sum(row):
+        total = 0
+        for c in numeric_cols:
+            v = row[c]
+            if v == "":
+                continue
+            try:
+                total += int(str(v).replace("*", ""))
+            except (ValueError, TypeError):
+                pass
+        return total
+    breakdown["Total (pts)"] = breakdown.apply(safe_sum, axis=1)
+    breakdown = breakdown.sort_values("Total (pts)", ascending=False).reset_index(drop=True)
+    return breakdown
+
+
     rounds = available_rounds(df)
     current_round = detect_current_round(df)
     round_leaders = get_round_leaders(df, rounds, current_round)
@@ -474,7 +576,7 @@ def style_table(df):
 
 # ── App layout ────────────────────────────────────────────────────────────────
 
-st.title("⛳ Masters Fantasy League 2026")
+st.title("⛳ Masters Fantasy League 2025")
 
 col1, col2 = st.columns([3, 1])
 with col2:
@@ -488,7 +590,7 @@ with st.spinner("Fetching live leaderboard..."):
 
         # Status banner
         if current_round:
-            st.info(f"🟢 **{current_round} in progress** — confirmed points are locked in, projected points reflect live scores including end of day points and cut")
+            st.info(f"🟢 **{current_round} in progress** — confirmed points are locked in, projected points reflect live scores")
         elif complete:
             st.success("🏆 Tournament complete — final standings")
         elif rounds:
@@ -516,6 +618,35 @@ with st.spinner("Fetching live leaderboard..."):
             st.caption("Confirmed points + live projections from the current round in progress.")
             proj_df = make_display(result, "Total", " Pts")
             st.dataframe(style_table(proj_df), use_container_width=True, height=height, hide_index=True)
+
+        # ── Golfer scoring breakdown download ─────────────────────────────
+        st.divider()
+        st.subheader("📥 Golfer Scoring Breakdown")
+        st.caption("One row per golfer with points broken down by scoring category and round. * = projected (live round).")
+
+        pos_nums = df_live["POS"].apply(parse_position)
+        tied_2nd = (pos_nums == 2).sum() if complete else 0
+        tie_for_2nd_blocks_3rd = (tied_2nd >= 3)
+        proj_cut_make, proj_cut_miss = get_projected_cut(df_live, rounds, current_round)
+        round_leaders = get_round_leaders(df_live, rounds, current_round)
+        low_round_scorers = get_low_round_scorers(df_live, rounds, current_round)
+
+        breakdown = build_golfer_breakdown(
+            df_live, rounds, current_round, round_leaders,
+            low_round_scorers, complete, tie_for_2nd_blocks_3rd,
+            proj_cut_make, proj_cut_miss
+        )
+
+        st.dataframe(breakdown, use_container_width=True, height=400, hide_index=True)
+
+        csv = breakdown.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="⬇️ Download as CSV",
+            data=csv,
+            file_name="masters_golfer_breakdown.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
         st.caption(f"Data auto-refreshes every 2 minutes. {len(result)} participants shown.")
 
