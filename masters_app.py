@@ -377,6 +377,58 @@ def score_golfer(df_name, df, rounds, round_leaders, low_round_scorers,
     return confirmed, projected
 
 
+def build_league_table(df):
+    rounds = available_rounds(df)
+    current_round = detect_current_round(df)
+    round_leaders = get_round_leaders(df, rounds, current_round)
+    low_round_scorers = get_low_round_scorers(df, rounds, current_round)
+    complete = is_tournament_complete(df)
+
+    pos_nums = df["POS"].apply(parse_position)
+    tied_2nd = (pos_nums == 2).sum() if complete else 0
+    tie_for_2nd_blocks_3rd = (tied_2nd >= 3)
+
+    all_golfers = {pick for entry in LEAGUE for pick in entry[1:]}
+    proj_cut_make, proj_cut_miss = get_projected_cut(df, rounds, current_round)
+    golfer_conf = {}
+    golfer_proj = {}
+    for g in all_golfers:
+        c, p = score_golfer(g, df, rounds, round_leaders, low_round_scorers,
+                            complete, HOLE_IN_ONES, tie_for_2nd_blocks_3rd,
+                            current_round, proj_cut_make, proj_cut_miss)
+        golfer_conf[g] = c
+        golfer_proj[g] = p
+
+    rows = []
+    for entry in LEAGUE:
+        participant = entry[0]
+        t1, t2, t3, t4, captain = entry[1], entry[2], entry[3], entry[4], entry[5]
+        picks = [t1, t2, t3, t4]
+
+        conf  = [golfer_conf.get(p, 0) for p in picks]
+        proj  = [golfer_proj.get(p, 0) for p in picks]
+        total = [c + p for c, p in zip(conf, proj)]
+
+        cap_conf = golfer_conf.get(captain, 0) * 2
+        cap_proj = golfer_proj.get(captain, 0) * 2
+
+        rows.append({
+            "Player":       participant,
+            "Tier 1":       t1,  "T1 Conf": conf[0],  "T1 Proj": proj[0],  "T1 Pts": total[0],
+            "Tier 2":       t2,  "T2 Conf": conf[1],  "T2 Proj": proj[1],  "T2 Pts": total[1],
+            "Tier 3":       t3,  "T3 Conf": conf[2],  "T3 Proj": proj[2],  "T3 Pts": total[2],
+            "Tier 4":       t4,  "T4 Conf": conf[3],  "T4 Proj": proj[3],  "T4 Pts": total[3],
+            "Captain":      captain,
+            "Cap Conf":     cap_conf, "Cap Proj": cap_proj, "Cap Pts": cap_conf + cap_proj,
+            "Confirmed":    sum(conf) + cap_conf,
+            "Projected":    sum(proj) + cap_proj,
+            "Total":        sum(total) + cap_conf + cap_proj,
+        })
+
+    result = pd.DataFrame(rows)
+    return result, rounds, current_round, complete
+
+
 def build_golfer_breakdown(df, rounds, current_round, round_leaders,
                            low_round_scorers, complete, tie_for_2nd_blocks_3rd,
                            proj_cut_make, proj_cut_miss):
