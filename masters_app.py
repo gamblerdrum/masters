@@ -157,7 +157,7 @@ LEAGUE = [
     ("Max Barton",           "Scottie Scheffler",    "Matt Fitzpatrick",    "J.J. Spaun",          "Tyrrell Hatton",    "Ryan Fox"),
 ]
 
-HOLE_IN_ONES = []
+HOLE_IN_ONES = ["Shane Lowry"]
 PAR_PER_ROUND = 72
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
