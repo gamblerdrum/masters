@@ -230,12 +230,40 @@ def available_rounds(df):
             out.append(r)
     return out
 
+def today_is_stale(df, completed_rounds):
+    """
+    Returns True if the TODAY column is just showing the previous round's score
+    (ESPN leaves TODAY populated between rounds with the last round's value).
+    Detection: if >50% of players with both a last-completed-round score and a
+    TODAY value have TODAY == (last_round_strokes - PAR), TODAY is stale.
+    """
+    if not completed_rounds or "TODAY" not in df.columns:
+        return False
+    last_r = completed_rounds[-1]
+    if last_r not in df.columns:
+        return False
+    matches = 0
+    total = 0
+    for _, row in df.iterrows():
+        r_strokes = parse_score(row.get(last_r, "--"))
+        today_val = parse_score(row.get("TODAY", "--"))
+        if r_strokes is None or today_val is None:
+            continue
+        total += 1
+        if today_val == (r_strokes - PAR_PER_ROUND):
+            matches += 1
+    if total < 5:
+        return False
+    return (matches / total) > 0.5
+
 def detect_current_round(df):
     if "TODAY" not in df.columns:
         return None
     if df["TODAY"].apply(parse_score).notna().sum() < 5:
         return None
     completed = available_rounds(df)
+    if today_is_stale(df, completed):
+        return None  # between rounds — TODAY is carrying yesterday's score
     for r in ["R1", "R2", "R3", "R4"]:
         if r not in completed:
             return r
@@ -383,15 +411,24 @@ def score_golfer(df_name, df, rounds, round_leaders, low_round_scorers,
         elif any(fuzzy_match(actual_name, p) for p in proj_cut_miss):
             projected -= 5
 
-    # Final finish — confirmed only when tournament done
-    if complete and not did_miss_cut:
+    # Final finish — confirmed when tournament done, projected during R4
+    if not did_miss_cut:
         pos_num = parse_position(pos_str)
-        if pos_num == 1:
-            confirmed += 10
-        if pos_num == 2:
-            confirmed += 5
-        if pos_num == 3 and not tie_for_2nd_blocks_3rd:
-            confirmed += 3
+        if complete:
+            if pos_num == 1:
+                confirmed += 10
+            if pos_num == 2:
+                confirmed += 5
+            if pos_num == 3 and not tie_for_2nd_blocks_3rd:
+                confirmed += 3
+        elif current_round == "R4" and pos_num is not None:
+            # Project based on live R4 leaderboard position
+            if pos_num == 1:
+                projected += 10
+            if pos_num == 2:
+                projected += 5
+            if pos_num == 3 and not tie_for_2nd_blocks_3rd:
+                projected += 3
 
     return confirmed, projected
 
@@ -522,14 +559,22 @@ def build_golfer_breakdown(df, rounds, current_round, round_leaders,
         r["Champion (pts)"] = ""
         r["2nd Place (pts)"] = ""
         r["3rd Place (pts)"] = ""
-        if complete and not did_miss_cut:
+        if not did_miss_cut:
             pos_num = parse_position(pos_str)
-            if pos_num == 1:
-                r["Champion (pts)"] = 10
-            if pos_num == 2:
-                r["2nd Place (pts)"] = 5
-            if pos_num == 3 and not tie_for_2nd_blocks_3rd:
-                r["3rd Place (pts)"] = 3
+            if complete:
+                if pos_num == 1:
+                    r["Champion (pts)"] = 10
+                if pos_num == 2:
+                    r["2nd Place (pts)"] = 5
+                if pos_num == 3 and not tie_for_2nd_blocks_3rd:
+                    r["3rd Place (pts)"] = 3
+            elif current_round == "R4" and pos_num is not None:
+                if pos_num == 1:
+                    r["Champion (pts)"] = "10*"
+                if pos_num == 2:
+                    r["2nd Place (pts)"] = "5*"
+                if pos_num == 3 and not tie_for_2nd_blocks_3rd:
+                    r["3rd Place (pts)"] = "3*"
 
         rows.append(r)
 
@@ -669,6 +714,11 @@ with st.spinner("Fetching live leaderboard..."):
             st.warning(f"⏸️ Between rounds — {len(rounds)} round(s) complete: {', '.join(rounds)}")
         else:
             st.warning("⏳ Tournament not yet started")
+
+        # Hole in one callout
+        if HOLE_IN_ONES:
+            names = ", ".join(HOLE_IN_ONES)
+            st.success(f"🕳️ **HOLE IN ONE!** {names} — +5 points applied to all teams with this player")
 
         with col1:
             search = st.text_input("🔍 Search for a player", placeholder="Type a name...")
