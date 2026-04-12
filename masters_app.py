@@ -181,6 +181,10 @@ def fuzzy_match(a, b):
 def missed_cut(pos_str):
     return any(t in str(pos_str).upper() for t in ("CUT", "WD", "DQ", "MDF", "MC"))
 
+def player_missed_cut(row):
+    """Check both POS and SCORE columns — POS goes blank after R2 but SCORE shows CUT."""
+    return missed_cut(str(row.get("POS", ""))) or missed_cut(str(row.get("SCORE", "")))
+
 def parse_position(pos_str):
     s = str(pos_str).strip().upper().lstrip("T")
     try:
@@ -200,14 +204,31 @@ def get_leaderboard():
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
+def active_player_count(df, round_col):
+    """
+    For R3/R4, only surviving players count toward the completion threshold.
+    A player is active if their SCORE column is not a cut/WD marker.
+    For R1/R2 we use the full field.
+    """
+    if round_col in ("R1", "R2"):
+        return len(df)
+    # Post-cut: exclude players whose SCORE shows CUT/WD/DQ etc.
+    if "SCORE" in df.columns:
+        survived = df[~df["SCORE"].apply(lambda v: missed_cut(str(v)))]
+        return max(len(survived), 1)
+    return len(df)
+
 def available_rounds(df):
-    """A round is only 'complete' once at least 75% of players have a score in that column."""
-    total = len(df)
-    return [
-        r for r in ["R1", "R2", "R3", "R4"]
-        if r in df.columns
-        and df[r].apply(lambda v: parse_score(v) is not None).sum() >= total * 0.75
-    ]
+    """A round is complete once 75% of eligible players have a score in that column."""
+    out = []
+    for r in ["R1", "R2", "R3", "R4"]:
+        if r not in df.columns:
+            continue
+        have_score = df[r].apply(lambda v: parse_score(v) is not None).sum()
+        eligible = active_player_count(df, r)
+        if have_score >= eligible * 0.75:
+            out.append(r)
+    return out
 
 def detect_current_round(df):
     if "TODAY" not in df.columns:
@@ -286,8 +307,7 @@ def get_projected_cut(df, rounds, current_round):
 
     for _, row in df.iterrows():
         player = row["PLAYER"]
-        pos_str = str(row.get("POS", ""))
-        if missed_cut(pos_str):
+        if player_missed_cut(row):
             miss_set.add(player)
             continue
         pos_num = parse_position(pos_str)
@@ -351,21 +371,20 @@ def score_golfer(df_name, df, rounds, round_leaders, low_round_scorers,
     # Cut — confirmed once cut has actually happened (R3 started)
     cut_has_happened = len(rounds) >= 2 and (len(rounds) >= 3 or current_round in ("R3", "R4"))
     pos_str = str(row.get("POS", ""))
+    did_miss_cut = player_missed_cut(row)
     if cut_has_happened:
-        if missed_cut(pos_str):
+        if did_miss_cut:
             confirmed -= 5
         else:
             confirmed += 10
     elif current_round == "R2" and proj_cut_make is not None and proj_cut_miss is not None:
-        # Project cut during R2 based on current leaderboard position
         if any(fuzzy_match(actual_name, p) for p in proj_cut_make):
             projected += 10
         elif any(fuzzy_match(actual_name, p) for p in proj_cut_miss):
             projected -= 5
-        # Players not yet on the course get 0 — unknown
 
     # Final finish — confirmed only when tournament done
-    if complete and not missed_cut(pos_str):
+    if complete and not did_miss_cut:
         pos_num = parse_position(pos_str)
         if pos_num == 1:
             confirmed += 10
@@ -486,8 +505,9 @@ def build_golfer_breakdown(df, rounds, current_round, round_leaders,
 
         # ── Cut ──────────────────────────────────────────────────────────────
         cut_has_happened = len(rounds) >= 2 and (len(rounds) >= 3 or current_round in ("R3", "R4"))
+        did_miss_cut = player_missed_cut(row)
         if cut_has_happened:
-            r["Cut (pts)"] = -5 if missed_cut(pos_str) else 10
+            r["Cut (pts)"] = -5 if did_miss_cut else 10
         elif current_round == "R2":
             if any(fuzzy_match(actual_name, p) for p in proj_cut_make):
                 r["Cut (proj pts)"] = 10
@@ -502,7 +522,7 @@ def build_golfer_breakdown(df, rounds, current_round, round_leaders,
         r["Champion (pts)"] = ""
         r["2nd Place (pts)"] = ""
         r["3rd Place (pts)"] = ""
-        if complete and not missed_cut(pos_str):
+        if complete and not did_miss_cut:
             pos_num = parse_position(pos_str)
             if pos_num == 1:
                 r["Champion (pts)"] = 10
